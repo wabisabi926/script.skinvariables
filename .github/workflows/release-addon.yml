@@ -3,7 +3,7 @@ name: Package Kodi Addon
 on:
   push:
     branches:
-      - Omega
+      - nexus
     paths:
       - addon.xml
       - .github/workflows/release-addon.yml
@@ -26,6 +26,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Read addon metadata
         id: meta
@@ -97,23 +100,57 @@ jobs:
             exit 1
           fi
 
+      - name: Generate release notes
+        id: notes
+        if: steps.guard.outputs.skip != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          PREV_TAG=$(git tag --list --sort=-version:refname | grep -Fxv "$VERSION" | head -n 1 || true)
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..${GITHUB_SHA}"
+            COMPARE="**Full Changelog**: https://github.com/${REPO}/compare/${PREV_TAG}...${VERSION}"
+          else
+            RANGE="$GITHUB_SHA"
+            COMPARE=""
+          fi
+          {
+            echo "## Changes in $VERSION"
+            echo
+            git log --no-merges --max-count=100 --pretty=format:'- %s (%h)' "$RANGE"
+            echo
+            echo
+            if [ -n "$COMPARE" ]; then
+              echo "$COMPARE"
+            fi
+          } > "$NOTES"
+          echo "path=$NOTES" >> "$GITHUB_OUTPUT"
+          cat "$NOTES"
+
       - name: Create or update GitHub release
         if: steps.guard.outputs.skip != 'true'
         shell: bash
         env:
           ADDON_ID: ${{ steps.meta.outputs.addon_id }}
           VERSION: ${{ steps.meta.outputs.version }}
+          NOTES_PATH: ${{ steps.notes.outputs.path }}
         run: |
           set -euo pipefail
           ZIP="dist/${ADDON_ID}-${VERSION}.zip"
+          NOTES="$NOTES_PATH"
 
           if gh release view "$VERSION" >/dev/null 2>&1; then
             gh release upload "$VERSION" "$ZIP" --clobber
-            echo "Uploaded $ZIP to existing release $VERSION."
+            gh release edit "$VERSION" --notes-file "$NOTES"
+            echo "Uploaded $ZIP and refreshed notes on existing release $VERSION."
           elif git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
-            gh release create "$VERSION" "$ZIP" --title "$VERSION" --generate-notes
+            gh release create "$VERSION" "$ZIP" --title "$VERSION" --notes-file "$NOTES"
             echo "Created release $VERSION from existing tag."
           else
-            gh release create "$VERSION" "$ZIP" --title "$VERSION" --target "$GITHUB_SHA" --generate-notes
+            gh release create "$VERSION" "$ZIP" --title "$VERSION" --target "$GITHUB_SHA" --notes-file "$NOTES"
             echo "Created release $VERSION."
           fi
