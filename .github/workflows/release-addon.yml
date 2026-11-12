@@ -110,24 +110,113 @@ jobs:
         run: |
           set -euo pipefail
           NOTES="$RUNNER_TEMP/release-notes.md"
-          PREV_TAG=$(git tag --list --sort=-version:refname | grep -Fxv "$VERSION" | head -n 1 || true)
+          PREV_TAG=$(git tag --list --sort=-version:refname '[0-9]*.[0-9]*.[0-9]*' | grep -Fxv "$VERSION" | head -n 1 || true)
           if [ -n "$PREV_TAG" ]; then
             RANGE="${PREV_TAG}..${GITHUB_SHA}"
-            COMPARE="**Full Changelog**: https://github.com/${REPO}/compare/${PREV_TAG}...${VERSION}"
+            COMPARE="**完整变更**: https://github.com/${REPO}/compare/${PREV_TAG}...${VERSION}"
           else
             RANGE="$GITHUB_SHA"
             COMPARE=""
           fi
-          {
-            echo "## Changes in $VERSION"
-            echo
-            git log --no-merges --max-count=100 --pretty=format:'- %s (%h)' "$RANGE"
-            echo
-            echo
-            if [ -n "$COMPARE" ]; then
-              echo "$COMPARE"
-            fi
-          } > "$NOTES"
+          export RANGE VERSION COMPARE NOTES
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+          import unicodedata
+
+          GROUPS = (
+              ("新增", {"sparkles", "✨", "heavy_plus_sign", "➕"}),
+              ("修复", {"bug", "🐛", "ambulance", "🚑", "symbols", "🔠"}),
+              ("优化", {"zap", "⚡", "recycle", "♻️", "arrow_up", "⬆️"}),
+              ("删除", {"fire", "🔥", "wastebasket", "🗑️"}),
+          )
+          SKIP = {"bookmark", "🔖", "construction_worker", "👷", "robot", "🤖", "hammer", "🔨"}
+          MAINTENANCE = re.compile(r"^(?:tidy(?:\s+up)?|version\s+bump|bump\s+version|wip)$", re.I)
+          SHORTCODE = re.compile(r"^:([a-z_]+):\s*")
+          REFERENCE = re.compile(
+              r"\s*(?:[-–—]\s*(?:(?:Refs|Resolves|Fixes|Closes)\s+)?(?:[\w.-]+/[\w.-]+)?#\d+"
+              r"|\((?:(?:Refs|Resolves|Fixes|Closes)\s+)?#\d+\))\s*$",
+              re.I,
+          )
+          SYMBOL = {"So", "Sk", "Sm", "Cf", "Mn"}
+
+
+          def get_marker(subject):
+              match = SHORTCODE.match(subject)
+              if match:
+                  return match.group(1), subject[match.end():]
+              prefix = ""
+              for char in subject:
+                  if ord(char) > 127 and unicodedata.category(char) in SYMBOL:
+                      prefix += char
+                  else:
+                      break
+              if not prefix:
+                  return "", subject
+              return prefix, subject[len(prefix):].lstrip()
+
+
+          def get_entry(subject):
+              marker, text = get_marker(subject)
+              while True:
+                  trimmed = REFERENCE.sub("", text)
+                  if trimmed == text:
+                      break
+                  text = trimmed
+              text = text.strip()
+              if text and text[0].islower():
+                  text = text[0].upper() + text[1:]
+              return marker, text
+
+
+          def get_subjects():
+              result = subprocess.run(
+                  [
+                      "git",
+                      "log",
+                      "--no-merges",
+                      "--max-count=100",
+                      "--pretty=format:%s",
+                      os.environ["RANGE"],
+                  ],
+                  check=True,
+                  capture_output=True,
+                  text=True,
+              )
+              return result.stdout.splitlines()
+
+
+          def get_buckets():
+              buckets = {name: [] for name, _ in GROUPS}
+              for subject in get_subjects():
+                  marker, text = get_entry(subject)
+                  if not text or marker in SKIP or MAINTENANCE.match(text):
+                      continue
+                  name = next((n for n, keys in GROUPS if marker in keys), "优化")
+                  if text not in buckets[name]:
+                      buckets[name].append(text)
+              return buckets
+
+
+          def get_notes():
+              lines = ["## 变更记录 " + os.environ["VERSION"], ""]
+              buckets = get_buckets()
+              for name, _ in GROUPS:
+                  if not buckets[name]:
+                      continue
+                  lines += ["### " + name, ""] + ["- " + t for t in buckets[name]] + [""]
+              if not any(buckets.values()):
+                  lines += ["- 内部维护与版本更新", ""]
+              compare = os.environ.get("COMPARE", "")
+              if compare:
+                  lines.append(compare)
+              return "\n".join(lines).rstrip() + "\n"
+
+
+          with open(os.environ["NOTES"], "w", encoding="utf-8", newline="\n") as handle:
+              handle.write(get_notes())
+          PY
           echo "path=$NOTES" >> "$GITHUB_OUTPUT"
           cat "$NOTES"
 
