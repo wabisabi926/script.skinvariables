@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 # License: GPL v.3 https://www.gnu.org/copyleft/gpl.html
 import xbmc
+from urllib.parse import urlsplit
 from xbmcgui import ListItem
 from jurialmunkey.ftools import cached_property
 from jurialmunkey.parser import parse_localize
+from resources.lib.multisearch.cache import SearchCache
+from resources.lib.multisearch.query import QUERY_PATTERN
 from resources.lib.multisearch.results import SourceResults
 from resources.lib.shortcuts.futils import read_meta_from_file
 from resources.lib.shortcuts.node.controller import ListGetShortcutsNode
@@ -16,6 +19,15 @@ TARGET_LIBRARIES = {
     'videos': 'video',
     'music': 'music',
 }
+MUSIC_ORIGINS = ('musicdb',)
+MUSIC_PLUGIN_PREFIX = 'plugin.audio.'
+CUSTOM_PATH_QUERY = '{query}'
+
+
+def get_path_origin(path):
+    """Addon id of a plugin path, otherwise the scheme of the path, such as videodb for the video library."""
+    parts = urlsplit(path)
+    return parts.netloc if parts.scheme == 'plugin' else parts.scheme
 
 
 class SearchSource:
@@ -24,10 +36,13 @@ class SearchSource:
     The path is either a name defined in the skin's search paths file or a raw path.
     """
 
-    def __init__(self, index, meta, definitions):
+    discover = False
+
+    def __init__(self, index, meta, definitions, search_cache):
         self.index = index
         self.meta = meta
         self.definitions = definitions
+        self.search_cache = search_cache
         self.cache = {}
 
     @cached_property
@@ -40,7 +55,15 @@ class SearchSource:
 
     @cached_property
     def target(self):
-        return self.meta.get('target') or ''
+        """Window that opens folder results. Search widgets picked from the shortcuts browser are links that have no
+        target, so music sources open in music and every other source in videos.
+        """
+        return self.meta.get('target') or self.get_fallback_target()
+
+    def get_fallback_target(self):
+        if self.origin in MUSIC_ORIGINS or self.origin.startswith(MUSIC_PLUGIN_PREFIX):
+            return 'music'
+        return 'videos'
 
     @cached_property
     def widget_style(self):
@@ -56,7 +79,26 @@ class SearchSource:
 
     def get_template(self):
         path = self.meta['path']
-        return self.definitions.get(path, path)
+        try:
+            return self.definitions[path]
+        except KeyError:
+            return self.get_custom_template(path)
+
+    def get_custom_template(self, path):
+        """Raw paths without a query placeholder have the encoded search text added to the end, as paths ending in
+        a query parameter such as &query= were searched before.
+        """
+        if QUERY_PATTERN.search(path):
+            return path
+        return f'{path}{CUSTOM_PATH_QUERY}'
+
+    @cached_property
+    def origin(self):
+        """Plugin or library the results come from. Results of sources with the same origin can be duplicates."""
+        return self.get_origin()
+
+    def get_origin(self):
+        return get_path_origin(self.template)
 
     @property
     def listitem(self):
@@ -67,12 +109,24 @@ class SearchSource:
         listitem.setArt({'icon': self.icon, 'thumb': self.icon})
         return listitem
 
-    def get_results(self, query, limit):
+    def accepts(self, query, options):
+        """Whether the source searches for the query. Search paths need search text."""
+        return bool(query.raw)
+
+    def get_cache_key(self, query, options):
+        """Results only depend on the search text. The window filters and sorts them."""
+        return query.raw
+
+    def get_source_results(self, query, options):
+        return SourceResults(self, query)
+
+    def get_results(self, query, options):
+        key = self.get_cache_key(query, options)
         try:
-            return self.cache[query.raw]
+            return self.cache[key]
         except KeyError:
-            self.cache[query.raw] = SourceResults(self, query, limit).items
-            return self.cache[query.raw]
+            self.cache[key] = self.get_source_results(query, options).items
+            return self.cache[key]
 
 
 class SearchSources:
@@ -83,6 +137,11 @@ class SearchSources:
         self.skin = skin
         self.paths_file = paths_file or SEARCH_PATHS_FILE
         self.disabled_positions = set()
+
+    @cached_property
+    def search_cache(self):
+        """Results of the sources kept for a day across windows. Each source also keeps its results while open."""
+        return SearchCache()
 
     @cached_property
     def skinid(self):
@@ -116,7 +175,7 @@ class SearchSources:
 
     def get_items(self):
         return [
-            SearchSource(index, meta, self.definitions)
+            SearchSource(index, meta, self.definitions, self.search_cache)
             for index, meta in enumerate(self.menu_meta)
             if meta.get('path')
         ]
@@ -129,12 +188,25 @@ class SearchSources:
             if position not in self.disabled_positions
         ]
 
+    @property
+    def all_enabled(self):
+        return not self.disabled_positions
+
     def set_enabled_positions(self, positions):
         self.disabled_positions = set(range(len(self.items))) - set(positions)
+
+    def reset(self):
+        """Enable every source as when the window opens."""
+        self.disabled_positions = set()
 
     @property
     def enabled(self):
         return [self.items[position] for position in self.enabled_positions]
+
+    @property
+    def discover_enabled(self):
+        """Enabled sources that look up the filters and sort method themselves."""
+        return [source for source in self.enabled if source.discover]
 
     @property
     def listitems(self):

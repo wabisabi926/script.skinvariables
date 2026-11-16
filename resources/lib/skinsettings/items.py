@@ -135,6 +135,14 @@ class SettingsListItem(DefinitionItem):
         raise NotImplementedError
 
     @cached_property
+    def tags(self):
+        """Tag labels that the tags button can filter by. Matching compares the labels as written."""
+        return self.get_tags()
+
+    def get_tags(self):
+        return [str(tag) for tag in self.meta.get('tags', [])]
+
+    @cached_property
     def search_property(self):
         return f'{SEARCH_PROPERTY_PREFIX}.{self.control_id}'
 
@@ -186,9 +194,17 @@ class SkinSetting(SettingsListItem):
     def category(self):
         return self.group.category
 
+    def get_tags(self):
+        # Settings carry the tags of their group so tagging a group tags each of its settings.
+        return list(dict.fromkeys(self.group.tags + super().get_tags()))
+
+    @property
+    def tag_texts(self):
+        return [get_label_text(tag) for tag in self.tags]
+
     @property
     def search_text(self):
-        return ' '.join((self.label_text, self.group.label_text, self.description_text)).lower()
+        return ' '.join((self.label_text, self.group.label_text, self.description_text, *self.tag_texts)).lower()
 
     @cached_property
     def focusable_condition(self):
@@ -207,6 +223,9 @@ class SkinSetting(SettingsListItem):
 
     def get_overrides(self):
         return super().get_overrides() + self.optional_overrides
+
+    def onrefresh(self, window):
+        """Update the control from the skin state when the window opens and when focus moves."""
 
 
 class ButtonSetting(SkinSetting):
@@ -231,9 +250,3 @@ class ButtonSetting(SkinSetting):
 class RadioButtonSetting(ButtonSetting):
     template = 'radiobutton'
     optional_tags = SkinSetting.optional_tags + (('selected', 'selected'),)
-
-
-SETTING_CLASSES = {
-    'button': ButtonSetting,
-    'radiobutton': RadioButtonSetting,
-}

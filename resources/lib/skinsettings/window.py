@@ -4,7 +4,7 @@ import xbmcgui
 from jurialmunkey.ftools import cached_property
 from resources.lib.scriptwindow.window import ScriptWindow
 from resources.lib.skinsettings.items import CATEGORY_PROPERTY
-from resources.lib.skinsettings.search import SettingsSearch, SettingsViewBounds
+from resources.lib.skinsettings.search import SettingsSearch, SettingsTags, SettingsViewBounds
 
 
 DESCRIPTION_CONTROL_ID = 6
@@ -13,6 +13,10 @@ DESCRIPTION_CONTROL_ID = 6
 class SkinSettingsWindow(ScriptWindow):
     def __init__(self, *args, definition=None, **kwargs):
         self.definition = definition
+        self.search_query = ''
+        self.search_tag = ''
+        # Tag of the search category, which some search modes select again when the category regains focus.
+        self.remembered_tag = ''
 
     @property
     def controls(self):
@@ -21,9 +25,16 @@ class SkinSettingsWindow(ScriptWindow):
     def set_description(self, text):
         self.getControl(DESCRIPTION_CONTROL_ID).setText(text)
 
+    @property
+    def category(self):
+        """Key of the selected category."""
+        return self.getProperty(CATEGORY_PROPERTY)
+
     def set_category(self, key):
-        # Returning focus to the selected category is not a change so it keeps the search text.
-        if self.getProperty(CATEGORY_PROPERTY) == key:
+        # Returning focus to the selected category is not a change so the search mode decides whether it keeps the
+        # search.
+        if self.category == key:
+            self.definition.search.onreturncategory(self)
             return
         self.setProperty(CATEGORY_PROPERTY, key)
         self.definition.search.onchangecategory(self)
@@ -35,8 +46,53 @@ class SkinSettingsWindow(ScriptWindow):
     def set_text(self, control_id, text):
         self.getControl(control_id).setText(text)
 
+    def get_slider_value(self, control_id):
+        return self.getControl(control_id).getInt()
+
+    def set_slider_value(self, control_id, value, maximum):
+        self.getControl(control_id).setInt(value, 0, 1, maximum)
+
+    def refresh_settings(self):
+        for setting in self.definition.settings:
+            setting.onrefresh(self)
+
+    @property
+    def settings_search(self):
+        return SettingsSearch(self.search_query, self.search_tag, self.definition.groups, self.definition.settings)
+
+    def update_search(self):
+        self.set_properties(self.settings_search.properties)
+
     def set_search(self, query):
-        self.set_properties(SettingsSearch(query, self.definition.groups, self.definition.settings).properties)
+        self.search_query = query
+        self.update_search()
+        self.definition.search.onchangesearch(self)
+
+    def set_tag(self, tag):
+        self.search_tag = tag
+        self.update_search()
+        self.definition.search.onchangesearch(self)
+
+    def load_tag(self, tag):
+        """Select a tag restored by the search rather than chosen, so the search does not handle it as a change."""
+        self.search_tag = tag
+        self.update_search()
+
+    def clear_search(self):
+        self.search_query = ''
+        self.search_tag = ''
+        self.update_search()
+
+    def choose_tag(self, heading):
+        # Selecting the search view first lets the tags reflect the settings that the search shows.
+        self.definition.search.onchoosetag(self)
+        tag_settings = self.definition.search.get_tag_settings(self, self.definition.settings)
+        clearable = self.definition.search.get_tag_clearable(self)
+        tags = SettingsTags(self.settings_search, tag_settings, self.window_id, clearable)
+        position = xbmcgui.Dialog().select(heading, tags.labels, preselect=tags.preselect)
+        if position == -1:
+            return
+        self.set_tag(tags.get_tag(position))
 
     @cached_property
     def window_id(self):
@@ -49,9 +105,13 @@ class SkinSettingsWindow(ScriptWindow):
     def set_view_bounds(self):
         self.set_properties(SettingsViewBounds(self.definition.ordered_settings, self.window_id).properties)
 
+    def onInit(self):
+        self.refresh_settings()
+
     def onFocus(self, control_id):
         # Settings can change while a dialog opened by a click is shown so moving focus also refreshes the view.
         super().onFocus(control_id)
+        self.refresh_settings()
         self.definition.search.onchangeview(self)
 
     def onClick(self, control_id):
